@@ -1,0 +1,201 @@
+/* USER CODE BEGIN Header */
+/**
+  * @file           : main.c
+  * @brief          : Industrial Fire & Gas System (Modular Main Logic)
+  */
+/* USER CODE END Header */
+
+#include "main.h"
+#include "adc.h"
+#include "tim.h"
+#include "gpio.h"
+#include "lcd.h"
+#include "hmi.h" // Added Custom HMI Module
+#include <string.h>
+
+/* Private define ------------------------------------------------------------*/
+/* CALIBRATION CONSTANTS */
+#define TEMP_DANGER 491  // 60 Degrees Celsius (Calibrated for Proteus 5V LM35)
+#define GAS_DANGER 819   // 20% LEL Concentration (Gas Leak Threshold)
+
+/* Global Shared Variables ---------------------------------------------------*/
+UI_State ui_state = SYS_NORMAL; 
+uint8_t alarm_Fire = 0;
+uint8_t alarm_Gas = 0;
+uint8_t manual_water_on = 0;   
+uint8_t manual_gas_closed = 0; 
+volatile char key_pressed = '\0';
+
+/* Private variables ---------------------------------------------------------*/
+uint32_t temp_value = 0; // Raw ADC reading for Temperature
+uint32_t gas_value = 0;  // Raw ADC reading for Gas
+
+/* Private function prototypes -----------------------------------------------*/
+void SystemClock_Config(void);
+void Update_Outputs(void);
+
+int main(void)
+{
+  // 1. Hardware Initialization
+  HAL_Init();
+  SystemClock_Config();
+  MX_GPIO_Init();
+  MX_ADC1_Init();
+  MX_TIM2_Init(); // DC Motor PWM
+  MX_TIM3_Init(); // Servo Motor PWM
+  MX_TIM4_Init(); // Keypad Scanner Interrupt Timer
+
+  // 2. Force Internal Pull-ups for Keypad Columns
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
+  GPIO_InitStruct.Pin = GPIO_PIN_4|GPIO_PIN_5|GPIO_PIN_6|GPIO_PIN_7;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+  // 3. Servo Hardware Latch Configuration
+  htim3.Instance->PSC = 79;      
+  htim3.Instance->ARR = 1999;    
+  htim3.Instance->EGR = TIM_EGR_UG; 
+
+  // 4. Start Hardware Peripherals
+  HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_1); 
+  HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1); 
+  
+  // 5. Initialize Modules
+  LCD_Init();
+  HMI_Init(); // Setup default password
+  HMI_UpdateLCD_Menu(); // Draw initial screen
+  
+  // Start the background keypad scanner (10ms interrupt)
+  HAL_TIM_Base_Start_IT(&htim4);
+
+  // --- MAIN SUPER LOOP ---
+  while (1)
+  {
+    // A. Process Keypad Input via HMI Module
+    if (key_pressed != '\0') 
+    {
+        HMI_HandleKeypadInput(key_pressed);
+        key_pressed = '\0'; 
+    }
+
+    // B. Read Temperature Sensor (PA0)
+    ADC_ChannelConfTypeDef sConfig = {0};
+    sConfig.Channel = ADC_CHANNEL_0;
+    sConfig.Rank = ADC_REGULAR_RANK_1;
+    sConfig.SamplingTime = ADC_SAMPLETIME_55CYCLES_5;
+    HAL_ADC_ConfigChannel(&hadc1, &sConfig);
+    HAL_ADC_Start(&hadc1);
+    if(HAL_ADC_PollForConversion(&hadc1, 10) == HAL_OK) temp_value = HAL_ADC_GetValue(&hadc1);
+    HAL_ADC_Stop(&hadc1);
+
+    // C. Read Gas Sensor (PA1)
+    sConfig.Channel = ADC_CHANNEL_1;
+    HAL_ADC_ConfigChannel(&hadc1, &sConfig);
+    HAL_ADC_Start(&hadc1);
+    if(HAL_ADC_PollForConversion(&hadc1, 10) == HAL_OK) gas_value = HAL_ADC_GetValue(&hadc1);
+    HAL_ADC_Stop(&hadc1);
+
+    // D. Update LCD if in Live Monitoring State
+    HMI_UpdateLiveMonitoring(temp_value, gas_value);
+
+    // E. Priority Alarm Logic Core (Fire overrides Gas)
+    if (temp_value > TEMP_DANGER) {
+        if (ui_state != SYS_ALARM_FIRE) { 
+            alarm_Fire = 1; 
+            ui_state = SYS_ALARM_FIRE; 
+            // Reset input buffer by mimicking HMI flush
+            HMI_HandleKeypadInput('A'); 
+            ui_state = SYS_ALARM_FIRE; // Force state back after flush
+            HMI_UpdateLCD_Menu();
+        }
+    } 
+    else if (gas_value > GAS_DANGER) {
+        if (alarm_Fire == 0 && ui_state != SYS_ALARM_GAS) {
+            alarm_Gas = 1;
+            ui_state = SYS_ALARM_GAS;
+            HMI_HandleKeypadInput('A'); 
+            ui_state = SYS_ALARM_GAS; 
+            HMI_UpdateLCD_Menu();
+        }
+    }
+
+    // F. Apply changes to Actuators
+    Update_Outputs();
+    
+    // Main loop non-blocking delay
+    HAL_Delay(50); 
+  }
+}
+
+// Background Keypad Scanner Trigger (Timer 4)
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) 
+{
+    if (htim->Instance == TIM4) 
+    {
+        HMI_ScanKeypad(); // Delegate to HMI Module
+    }
+}
+
+// Hardware Output Control Logic
+void Update_Outputs(void) 
+{
+    // Water Pump (DC Motor): Full speed (999) if Fire OR Manual Override
+    if (alarm_Fire || manual_water_on) __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_1, 999);
+    else __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_1, 0);
+
+    // Gas Valve (Servo): 
+    // 100 = 1ms Pulse = 0.0 Degrees (OPEN)
+    // 200 = 2ms Pulse = +90.0 Degrees (CLOSED)
+    if (alarm_Gas || alarm_Fire || manual_gas_closed) __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, 210);
+    else __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, 95);
+}
+
+// System Clock Configuration (Auto-generated by STM32CubeMX)
+void SystemClock_Config(void)
+{
+  RCC_OscInitTypeDef RCC_OscInitStruct = {0};
+  RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
+  RCC_PeriphCLKInitTypeDef PeriphClkInit = {0};
+
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
+  RCC_OscInitStruct.HSIState = RCC_HSI_ON;
+  RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
+  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_NONE;
+  if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
+                              |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
+  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_HSI;
+  RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
+  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV1;
+  RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
+
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_0) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  PeriphClkInit.PeriphClockSelection = RCC_PERIPHCLK_ADC;
+  PeriphClkInit.AdcClockSelection = RCC_ADCPCLK2_DIV2;
+  if (HAL_RCCEx_PeriphCLKConfig(&PeriphClkInit) != HAL_OK)
+  {
+    Error_Handler();
+  }
+}
+
+void Error_Handler(void)
+{
+  __disable_irq();
+  while (1)
+  {
+  }
+}
+
+#ifdef  USE_FULL_ASSERT
+void assert_failed(uint8_t *file, uint32_t line)
+{
+}
+#endif /* USE_FULL_ASSERT */
