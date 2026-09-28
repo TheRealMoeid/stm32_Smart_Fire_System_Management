@@ -833,8 +833,7 @@ Unless a license is added to the repository, the default copyright rules apply a
 
 # 👤 Author
 
-**Moeid Ghiady**
-**Navid Rostami**
+**Moeid Ghiady** & **Navid Rostami**
 
 ---
 
