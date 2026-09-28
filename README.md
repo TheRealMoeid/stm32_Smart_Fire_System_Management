@@ -833,15 +833,8 @@ Unless a license is added to the repository, the default copyright rules apply a
 
 # 👤 Author
 
-**Moeid**
-
-GitHub:
-
-[TheRealMoeid](https://github.com/TheRealMoeid)
-
-Repository:
-
-[STM32 Smart Fire Management System](https://github.com/TheRealMoeid/stm32_Smart_Fire_System_Management)
+**Moeid Ghiady**
+**Navid Rostami**
 
 ---
 
